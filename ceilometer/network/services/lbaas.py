@@ -16,6 +16,10 @@
 import abc
 import collections
 
+# --add-start--
+from oslo_config import cfg
+# --add-end--
+
 from oslo_utils import timeutils
 import six
 
@@ -23,6 +27,9 @@ from ceilometer.i18n import _
 from ceilometer.network.services import base
 from ceilometer.openstack.common import log
 from ceilometer import sample
+# --add-start--
+from ceilometer import neutron_client
+# --add-end--
 
 LOG = log.getLogger(__name__)
 
@@ -31,8 +38,37 @@ LBStatsData = collections.namedtuple(
     ['active_connections', 'total_connections', 'bytes_in', 'bytes_out']
 )
 
+# --add-start--
+LOAD_BALANCER_STATUS_V2 = {
+    'offline': 0,
+    'online': 1,
+    'no_monitor': 3,
+    'error': 4,
+    'degraded': 5
+}
 
-class LBPoolPollster(base.BaseServicesPollster):
+
+class BaseLBPollster(base.BaseServicesPollster):
+    """Base Class for Load Balancer pollster"""
+
+    def __init__(self):
+        super(BaseLBPollster, self).__init__()
+        self.lb_version = cfg.CONF.service_types.neutron_lbaas_version
+
+    def get_load_balancer_status_id(self, value):
+        # LOG.debug("DebugMsg(lbaas)7: %s" % value)
+        if self.lb_version == 'v1':
+            resource_status = self.get_status_id(value)
+        elif self.lb_version == 'v2':
+            status = value.lower()
+            resource_status = LOAD_BALANCER_STATUS_V2.get(status, -1)
+            # LOG.debug("DebugMsg(lbaas)1: %s" % resource_status)
+        # LOG.debug("DebugMsg(lbaas)2: %s" % resource_status)
+        return resource_status
+# --add-end--
+
+
+class LBPoolPollster(BaseLBPollster):
     """Pollster to capture Load Balancer pool status samples."""
 
     FIELDS = ['admin_state_up',
@@ -56,7 +92,8 @@ class LBPoolPollster(base.BaseServicesPollster):
 
         for pool in resources:
             LOG.debug("Load Balancer Pool : %s" % pool)
-            status = self.get_status_id(pool['status'])
+            # status = self.get_status_id(pool['status'])
+            status = self.get_load_balancer_status_id(pool['status'])
             if status == -1:
                 # unknown status, skip this sample
                 LOG.warn(_("Unknown status %(stat)s received on pool %(id)s, "
@@ -125,7 +162,7 @@ class LBVipPollster(base.BaseServicesPollster):
             )
 
 
-class LBMemberPollster(base.BaseServicesPollster):
+class LBMemberPollster(BaseLBPollster):
     """Pollster to capture Load Balancer Member status samples."""
 
     FIELDS = ['admin_state_up',
@@ -146,7 +183,8 @@ class LBMemberPollster(base.BaseServicesPollster):
 
         for member in resources:
             LOG.debug("Load Balancer Member : %s" % member)
-            status = self.get_status_id(member['status'])
+            # status = self.get_status_id(member['status'])
+            status = self.get_load_balancer_status_id(member['status'])
             if status == -1:
                 LOG.warn(_("Unknown status %(stat)s received on member %(id)s,"
                          "skipping sample") % {'stat': member['status'],
@@ -204,11 +242,19 @@ class _LBStatsPollster(base.BaseServicesPollster):
      and bandwidth.
     """
 
-    def _get_lb_pools(self):
-        return self.nc.pool_get_all()
+    # def _get_lb_pools(self):
+    #     return self.nc.pool_get_all()
+    #
+    # def _get_pool_stats(self, pool_id):
+    #     return self.nc.pool_stats(pool_id)
 
-    def _get_pool_stats(self, pool_id):
-        return self.nc.pool_stats(pool_id)
+    # --add-start--
+    def __init__(self):
+        super(_LBStatsPollster, self).__init__()
+        self.client = neutron_client.Client()
+        self.lb_version = cfg.CONF.service_types.neutron_lbaas_version
+
+    # --add-end--
 
     @staticmethod
     def make_sample_from_pool(pool, name, type, unit, volume,
@@ -230,7 +276,8 @@ class _LBStatsPollster(base.BaseServicesPollster):
     def _populate_stats_cache(self, pool_id, cache):
         i_cache = cache.setdefault("lbstats", {})
         if pool_id not in i_cache:
-            stats = self._get_pool_stats(pool_id)['stats']
+            # stats = self._get_pool_stats(pool_id)['stats']
+            stats = self.client.pool_stats(pool_id)['stats']
             i_cache[pool_id] = LBStatsData(
                 active_connections=stats['active_connections'],
                 total_connections=stats['total_connections'],
@@ -239,23 +286,67 @@ class _LBStatsPollster(base.BaseServicesPollster):
             )
         return i_cache[pool_id]
 
+    # --add-start--
+    def _populate_stats_cache_v2(self, loadbalancer_id, cache):
+        i_cache = cache.setdefault("lbstats", {})
+        if loadbalancer_id not in i_cache:
+            stats = self.client.get_loadbalancer_stats(loadbalancer_id)
+            i_cache[loadbalancer_id] = LBStatsData(
+                active_connections=stats['active_connections'],
+                total_connections=stats['total_connections'],
+                bytes_in=stats['bytes_in'],
+                bytes_out=stats['bytes_out'],
+            )
+        return i_cache[loadbalancer_id]
+
+    # --add-end--
+
     @property
     def default_discovery(self):
-        return 'lb_pools'
+        # return 'lb_pools'
+        # --add-start--
+        # LOG.debug("DebugMsg(lbaas)8: %s" % "in default_discovery")
+        discovery_resource = 'lb_pools'
+        if self.lb_version == 'v2':
+            discovery_resource = 'lb_loadbalancers'
+        return discovery_resource
+        # --add-end--
 
     @abc.abstractmethod
     def _get_sample(pool, c_data):
         """Return one Sample."""
 
-    def get_samples(self, manager, cache, resources):
-        for pool in resources:
-            try:
-                c_data = self._populate_stats_cache(pool['id'], cache)
-                yield self._get_sample(pool, c_data)
-            except Exception as err:
-                LOG.exception(_('Ignoring pool %(pool_id)s: %(error)s'),
-                              {'pool_id': pool['id'], 'error': err})
+    # def get_samples(self, manager, cache, resources):
+    #     for pool in resources:
+    #         try:
+    #             c_data = self._populate_stats_cache(pool['id'], cache)
+    #             yield self._get_sample(pool, c_data)
+    #         except Exception as err:
+    #             LOG.exception(_('Ignoring pool %(pool_id)s: %(error)s'),
+    #                           {'pool_id': pool['id'], 'error': err})
 
+    # --add-start--
+    def get_samples(self, manager, cache, resources):
+        if self.lb_version == 'v1':
+            for pool in resources:
+                try:
+                    c_data = self._populate_stats_cache(pool['id'], cache)
+                    yield self._get_sample(pool, c_data)
+                except Exception:
+                    LOG.exception(_('Ignoring pool %(pool_id)s'),
+                                  {'pool_id': pool['id']})
+        elif self.lb_version == 'v2':
+            for loadbalancer in resources:
+                try:
+                    c_data = self._populate_stats_cache_v2(loadbalancer['id'],
+                                                           cache)
+                    yield self._get_sample(loadbalancer, c_data)
+                except Exception:
+                    LOG.exception(
+                        _('Ignoring '
+                          'loadbalancer %(loadbalancer_id)s'),
+                        {'loadbalancer_id': loadbalancer['id']})
+    # --add-end--
 
 class LBActiveConnectionsPollster(_LBStatsPollster):
     """Pollster to capture Active Load Balancer connections."""
@@ -288,12 +379,13 @@ class LBTotalConnectionsPollster(_LBStatsPollster):
 class LBBytesInPollster(_LBStatsPollster):
     """Pollster to capture incoming bytes."""
 
+    # modify type=sample.TYPE_CUMULATIVE, to type=sample.TYPE_GAUGE,
     @staticmethod
     def _get_sample(pool, data):
         return make_sample_from_pool(
             pool,
             name='network.services.lb.incoming.bytes',
-            type=sample.TYPE_CUMULATIVE,
+            type=sample.TYPE_GAUGE,
             unit='B',
             volume=data.bytes_in,
         )
@@ -302,12 +394,13 @@ class LBBytesInPollster(_LBStatsPollster):
 class LBBytesOutPollster(_LBStatsPollster):
     """Pollster to capture outgoing bytes."""
 
+    # modify type=sample.TYPE_CUMULATIVE, to type=sample.TYPE_GAUGE,
     @staticmethod
     def _get_sample(pool, data):
         return make_sample_from_pool(
             pool,
             name='network.services.lb.outgoing.bytes',
-            type=sample.TYPE_CUMULATIVE,
+            type=sample.TYPE_GAUGE,
             unit='B',
             volume=data.bytes_out,
         )
@@ -328,3 +421,102 @@ def make_sample_from_pool(pool, name, type, unit, volume,
         timestamp=timeutils.isotime(),
         resource_metadata=resource_metadata,
     )
+
+
+# --add-start--
+class LBListenerPollster(BaseLBPollster):
+    """Pollster to capture Load Balancer Listener status samples."""
+
+    FIELDS = ['admin_state_up',
+              'connection_limit',
+              'description',
+              'name',
+              'default_pool_id',
+              'protocol',
+              'protocol_port',
+              'operating_status',
+              'loadbalancers'
+              ]
+
+    @property
+    def default_discovery(self):
+        return 'lb_listeners'
+
+    def get_samples(self, manager, cache, resources):
+        resources = resources or []
+
+        for listener in resources:
+            LOG.debug("Load Balancer Listener : %s" % listener)
+            status = self.get_load_balancer_status_id(
+                listener['operating_status'])
+            if status == -1:
+                # unknown status, skip this sample
+                LOG.warning(_("Unknown status %(stat)s received on listener "
+                              "%(id)s, skipping sample")
+                            % {'stat': listener['operating_status'],
+                               'id': listener['id']})
+                continue
+
+            yield sample.Sample(
+                name='network.services.lb.listener',
+                type=sample.TYPE_GAUGE,
+                unit='listener',
+                volume=status,
+                user_id=None,
+                project_id=listener['tenant_id'],
+                resource_id=listener['id'],
+                timestamp=timeutils.utcnow().isoformat(),
+                resource_metadata=self.extract_metadata(listener)
+            )
+
+
+class LBLoadBalancerPollster(BaseLBPollster):
+    """Pollster to capture Load Balancer status samples."""
+
+    FIELDS = ['admin_state_up',
+              'description',
+              'vip_address',
+              'listeners',
+              'name',
+              'vip_subnet_id',
+              'operating_status',
+              ]
+
+    # LOG.debug("DebugMsg(lbaas)3: in class LBLoadBalancerPollster")
+
+
+    @property
+    def default_discovery(self):
+        # LOG.debug("DebugMsg(lbaas)4: in class LBLoadBalancerPollster-default_discovery")
+        return 'lb_loadbalancers'
+
+    def get_samples(self, manager, cache, resources):
+        resources = resources or []
+        # LOG.debug("DebugMsg(lbaas)5:%s" % resources)
+
+        for loadbalancer in resources:
+            # LOG.debug("DebugMsg(lbaas)6:%s" % loadbalancer)
+            LOG.debug("Load Balancer: %s" % loadbalancer)
+            status = self.get_load_balancer_status_id(
+                loadbalancer['operating_status'])
+            if status == -1:
+                # unknown status, skip this sample
+                LOG.warning(_("Unknown status %(stat)s received "
+                              "on Load Balancer "
+                              "%(id)s, skipping sample")
+                            % {'stat': loadbalancer['operating_status'],
+                               'id': loadbalancer['id']})
+                continue
+
+            yield sample.Sample(
+                name='network.services.lb.loadbalancer',
+                type=sample.TYPE_GAUGE,
+                unit='loadbalancer',
+                volume=status,
+                user_id=None,
+                project_id=loadbalancer['tenant_id'],
+                resource_id=loadbalancer['id'],
+                timestamp=timeutils.utcnow().isoformat(),
+                resource_metadata=self.extract_metadata(loadbalancer)
+            )
+# --add-end--
