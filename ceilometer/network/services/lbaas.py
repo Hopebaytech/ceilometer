@@ -379,13 +379,13 @@ class LBTotalConnectionsPollster(_LBStatsPollster):
 class LBBytesInPollster(_LBStatsPollster):
     """Pollster to capture incoming bytes."""
 
-    # modify type=sample.TYPE_CUMULATIVE, to type=sample.TYPE_GAUGE,
+    # ref-doc and new code say it's gauge, but actually it's cumulative
     @staticmethod
     def _get_sample(pool, data):
         return make_sample_from_pool(
             pool,
             name='network.services.lb.incoming.bytes',
-            type=sample.TYPE_GAUGE,
+            type=sample.TYPE_CUMULATIVE,
             unit='B',
             volume=data.bytes_in,
         )
@@ -394,13 +394,13 @@ class LBBytesInPollster(_LBStatsPollster):
 class LBBytesOutPollster(_LBStatsPollster):
     """Pollster to capture outgoing bytes."""
 
-    # modify type=sample.TYPE_CUMULATIVE, to type=sample.TYPE_GAUGE,
+    # ref-doc and new code say it's gauge, but actually it's cumulative
     @staticmethod
     def _get_sample(pool, data):
         return make_sample_from_pool(
             pool,
             name='network.services.lb.outgoing.bytes',
-            type=sample.TYPE_GAUGE,
+            type=sample.TYPE_CUMULATIVE,
             unit='B',
             volume=data.bytes_out,
         )
