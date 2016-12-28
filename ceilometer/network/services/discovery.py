@@ -56,6 +56,30 @@ class LBMembersDiscovery(_BaseServicesDiscovery):
                 if i.get('status', None) != 'error']
 
 
+# --add-start--
+class LBListenersDiscovery(_BaseServicesDiscovery):
+    @plugin_base.check_keystone(cfg.CONF.service_types.neutron)
+    def discover(self, manager, param=None):
+        """Discover load balancer listener resources to monitor."""
+
+        listeners = self.neutron_cli.list_listener()
+        return [i for i in listeners
+                if i.get('operating_status', None) != 'error']
+
+
+class LBLoadBalancersDiscovery(_BaseServicesDiscovery):
+    @plugin_base.check_keystone(cfg.CONF.service_types.neutron)
+    def discover(self, manager, param=None):
+        """Discover load balancer resources to monitor."""
+
+        loadbalancers = self.neutron_cli.list_loadbalancer()
+        # for a in loadbalancers
+        #     LOG.debug("DebugMsg(discovery)1: %s(OK)" % a)
+        return [i for i in loadbalancers
+                if i.get('operating_status', None) != 'error']
+# --add-end--
+
+
 class LBHealthMonitorsDiscovery(_BaseServicesDiscovery):
     @plugin_base.check_keystone(cfg.CONF.service_types.neutron)
     def discover(self, manager, param=None):
